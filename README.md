@@ -9,6 +9,7 @@ An automated Minecraft AFK bot using [Mineflayer](https://github.com/PrismarineJ
   - Head rotation (20-60 second intervals)
   - Small walks/jumps (30-90 second intervals)
   - Continuous subtle movements
+- **AuthMe Auto-Login**: Automatically handles `/login` and `/register` commands
 - **Auto-Reconnect**: Automatically reconnects if disconnected
 - **Auto-Restart**: Stops at 5h 50m and automatically triggers a new run
 - **Remote Commands**: Respond to chat commands for status checks
@@ -29,6 +30,7 @@ An automated Minecraft AFK bot using [Mineflayer](https://github.com/PrismarineJ
 | `SERVER_VERSION` | No | `1.20.1` | Minecraft version |
 | `AUTH_TYPE` | No | `offline` | Authentication: `offline`, `microsoft`, or `mojang` |
 | `BOT_PASSWORD` | No | - | Password (for online servers) |
+| `AUTHME_PASSWORD` | No | - | AuthMe plugin password (see below) |
 
 3. **Start the Bot**
 
@@ -49,9 +51,37 @@ The bot performs these actions at random intervals:
 
 If you mention the bot's username in chat, it can respond to commands:
 
-- `@AFKBot status` - Shows runtime, health, food, and position
+- `@AFKBot status` - Shows runtime, health, food, auth status, and position
 - `@AFKBot pos` - Shows current coordinates
+- `@AFKBot auth` - Shows AuthMe authentication status
 - `@AFKBot stop` - Gracefully shuts down the bot
+
+## AuthMe Plugin Support
+
+If the server uses the [AuthMe](https://github.com/AuthMe/AuthMeReloaded) plugin, the bot can automatically handle authentication:
+
+### Setup
+
+1. Add the `AUTHME_PASSWORD` secret to your GitHub repository
+2. The bot will automatically detect and respond to:
+   - `/register` prompts (for new accounts)
+   - `/login` prompts (for existing accounts)
+
+### How it works
+
+- When you join, AuthMe typically sends a message like "Please /login" or "Please /register"
+- The bot detects these messages and automatically sends the appropriate command
+- It waits 2-4 seconds (randomized) before responding to appear more natural
+- After successful authentication, anti-AFK routines start automatically
+- If authentication fails 3 times, the bot reconnects and tries again
+
+### AuthMe Features
+
+- **Auto-Register**: Detects register prompts and sends `/register <password> <password>`
+- **Auto-Login**: Detects login prompts and sends `/login <password>`
+- **Success Detection**: Recognizes successful authentication messages
+- **Error Handling**: Handles wrong password, already registered, etc.
+- **Anti-AFK Delay**: Won't move until fully authenticated
 
 ## Runtime Behavior
 

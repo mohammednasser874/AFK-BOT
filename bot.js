@@ -11,10 +11,17 @@ const SERVER_VERSION = process.env.SERVER_VERSION || '1.20.1';
 const AUTH_TYPE = process.env.AUTH_TYPE || 'offline'; // 'microsoft', 'mojang', or 'offline'
 const MAX_RUNTIME_MINUTES = 350; // 5 hours 50 minutes (350 minutes)
 
+// AuthMe configuration
+const AUTHME_PASSWORD = process.env.AUTHME_PASSWORD || '';
+let isAuthMeAuthenticated = false;
+let authAttempts = 0;
+const MAX_AUTH_ATTEMPTS = 3;
+
 // Track runtime
 const startTime = Date.now();
 let lastActivityTime = Date.now();
 let isShuttingDown = false;
+let botInstance = null;
 
 // Create bot instance
 function createBot() {
@@ -33,6 +40,7 @@ function createBot() {
     }
 
     const bot = mineflayer.createBot(options);
+    botInstance = bot;
 
     // Load plugins
     bot.loadPlugin(pathfinder);
@@ -40,6 +48,7 @@ function createBot() {
     // Store original position for reference
     let originalPosition = null;
     let mcData = null;
+    let antiAfkStarted = false;
 
     // Bot spawn event
     bot.on('spawn', () => {
@@ -55,11 +64,19 @@ function createBot() {
         const defaultMove = new Movements(bot, mcData);
         bot.pathfinder.setMovements(defaultMove);
 
-        // Initial delay before starting anti-AFK
+        // Wait for AuthMe messages before starting anti-AFK
+        // AuthMe usually sends messages within first few seconds
+        console.log(`[${getTimestamp()}] Waiting for AuthMe authentication...`);
+
+        // Set a timeout - if no auth required, start anti-AFK after 8 seconds
         setTimeout(() => {
-            console.log(`[${getTimestamp()}] Starting anti-AFK routines...`);
-            startAntiAfkRoutines(bot);
-        }, 5000);
+            if (!antiAfkStarted) {
+                console.log(`[${getTimestamp()}] No AuthMe prompt detected, assuming no auth required`);
+                isAuthMeAuthenticated = true;
+                startAntiAfkRoutines(bot);
+                antiAfkStarted = true;
+            }
+        }, 8000);
     });
 
     // Login event
@@ -75,6 +92,9 @@ function createBot() {
     // Kicked from server
     bot.on('kicked', (reason, loggedIn) => {
         console.log(`[${getTimestamp()}] Bot was kicked! Reason: ${reason}`);
+        isAuthMeAuthenticated = false;
+        authAttempts = 0;
+        antiAfkStarted = false;
         if (!isShuttingDown) {
             console.log(`[${getTimestamp()}] Reconnecting in 10 seconds...`);
             setTimeout(createBot, 10000);
@@ -84,16 +104,24 @@ function createBot() {
     // End/Disconnect event
     bot.on('end', () => {
         console.log(`[${getTimestamp()}] Bot disconnected`);
+        isAuthMeAuthenticated = false;
+        authAttempts = 0;
+        antiAfkStarted = false;
         if (!isShuttingDown) {
             console.log(`[${getTimestamp()}] Reconnecting in 10 seconds...`);
             setTimeout(createBot, 10000);
         }
     });
 
-    // Chat message handler - can be used for remote commands
+    // Chat message handler - AuthMe detection and remote commands
     bot.on('message', (jsonMsg) => {
         const message = jsonMsg.toString();
         console.log(`[${getTimestamp()}] Chat: ${message}`);
+
+        // AuthMe Detection and Auto-Response
+        if (!isAuthMeAuthenticated && AUTHME_PASSWORD) {
+            handleAuthMeMessages(bot, message);
+        }
 
         // Simple command processing (if message contains bot username)
         if (message.includes(bot.username) && !message.includes(bot.username + '>')) {
@@ -117,41 +145,157 @@ function createBot() {
     return bot;
 }
 
+// Handle AuthMe login/register messages
+function handleAuthMeMessages(bot, message) {
+    const lowerMsg = message.toLowerCase();
+
+    // Common AuthMe register messages
+    const registerPatterns = [
+        /register/i,
+        /\/(register|reg)/i,
+        /register.*password/i,
+        /please register/i,
+        /authentication.*register/i,
+        /you need to register/i,
+        /\/register.*password/i,
+        /type \/register/i,
+        /usage: \/register/i
+    ];
+
+    // Common AuthMe login messages
+    const loginPatterns = [
+        /login/i,
+        /\/(login|log)/i,
+        /authenticate/i,
+        /please login/i,
+        /authentication.*login/i,
+        /you need to login/i,
+        /\/login.*password/i,
+        /type \/login/i,
+        /usage: \/login/i,
+        /password.*login/i
+    ];
+
+    // Success patterns
+    const successPatterns = [
+        /successfully logged in/i,
+        /login successful/i,
+        /welcome back/i,
+        /authenticated successfully/i,
+        /successful authentication/i,
+        /registered successfully/i,
+        /registration successful/i
+    ];
+
+    // Error patterns (wrong password, etc)
+    const errorPatterns = [
+        /wrong password/i,
+        /incorrect password/i,
+        /password.*incorrect/i,
+        /login failed/i,
+        /registration failed/i,
+        /already registered/i,
+        /not registered/i
+    ];
+
+    // Check for success messages
+    if (successPatterns.some(pattern => pattern.test(message))) {
+        console.log(`[${getTimestamp()}] AuthMe: Successfully authenticated!`);
+        isAuthMeAuthenticated = true;
+        authAttempts = 0;
+
+        // Start anti-AFK routines after successful auth
+        setTimeout(() => {
+            console.log(`[${getTimestamp()}] Starting anti-AFK routines...`);
+            startAntiAfkRoutines(bot);
+        }, 2000);
+        return;
+    }
+
+    // Check for error messages
+    if (errorPatterns.some(pattern => pattern.test(message))) {
+        console.log(`[${getTimestamp()}] AuthMe: Authentication error - ${message}`);
+        authAttempts++;
+
+        if (authAttempts >= MAX_AUTH_ATTEMPTS) {
+            console.log(`[${getTimestamp()}] AuthMe: Max auth attempts reached. Reconnecting...`);
+            bot.quit();
+            setTimeout(createBot, 10000);
+        }
+        return;
+    }
+
+    // Check if we need to register
+    if (registerPatterns.some(pattern => pattern.test(message))) {
+        if (authAttempts < MAX_AUTH_ATTEMPTS) {
+            console.log(`[${getTimestamp()}] AuthMe: Register prompt detected`);
+
+            // Wait a random time (2-4 seconds) before responding
+            setTimeout(() => {
+                if (!isAuthMeAuthenticated) {
+                    // Try both common register formats
+                    bot.chat(`/register ${AUTHME_PASSWORD} ${AUTHME_PASSWORD}`);
+                    console.log(`[${getTimestamp()}] AuthMe: Sent /register command`);
+                    authAttempts++;
+                }
+            }, 2000 + Math.random() * 2000);
+        }
+        return;
+    }
+
+    // Check if we need to login
+    if (loginPatterns.some(pattern => pattern.test(message))) {
+        if (authAttempts < MAX_AUTH_ATTEMPTS) {
+            console.log(`[${getTimestamp()}] AuthMe: Login prompt detected`);
+
+            // Wait a random time (2-4 seconds) before responding
+            setTimeout(() => {
+                if (!isAuthMeAuthenticated) {
+                    bot.chat(`/login ${AUTHME_PASSWORD}`);
+                    console.log(`[${getTimestamp()}] AuthMe: Sent /login command`);
+                    authAttempts++;
+                }
+            }, 2000 + Math.random() * 2000);
+        }
+        return;
+    }
+}
+
 // Anti-AFK routines
 function startAntiAfkRoutines(bot) {
     // Routine 1: Random arm swing every 15-45 seconds
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performRandomArmSwing(bot);
     }, getRandomInterval(15000, 45000));
 
     // Routine 2: Head rotation every 20-60 seconds
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performRandomHeadTurn(bot);
     }, getRandomInterval(20000, 60000));
 
     // Routine 3: Small movement every 30-90 seconds
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performRandomMovement(bot);
     }, getRandomInterval(30000, 90000));
 
     // Routine 4: Jump occasionally every 60-180 seconds
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performRandomJump(bot);
     }, getRandomInterval(60000, 180000));
 
     // Routine 5: Look around continuously (subtle)
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performSubtleLook(bot);
     }, 3000);
 
     // Main anti-AFK: Change position every minute
     setInterval(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || !isAuthMeAuthenticated) return;
         performAntiAfkSequence(bot);
     }, 60000); // Every minute
 
@@ -178,7 +322,7 @@ function performAntiAfkSequence(bot) {
 
     shuffled.slice(0, numActions).forEach((action, index) => {
         setTimeout(() => {
-            if (!isShuttingDown && bot.entity) {
+            if (!isShuttingDown && bot.entity && isAuthMeAuthenticated) {
                 action();
             }
         }, index * 2000); // Stagger actions by 2 seconds
@@ -329,7 +473,8 @@ function handleCommand(bot, message) {
         const health = bot.health || '?';
         const food = bot.food || '?';
         const pos = formatPosition(bot.entity?.position);
-        bot.chat(`Status: ${runtime}min | HP: ${health}/20 | Food: ${food}/20 | Pos: ${pos}`);
+        const authStatus = isAuthMeAuthenticated ? 'Auth: Yes' : 'Auth: No';
+        bot.chat(`Status: ${runtime}min | HP: ${health}/20 | Food: ${food}/20 | ${authStatus} | Pos: ${pos}`);
     }
     else if (lowerMsg.includes('pos') || lowerMsg.includes('position')) {
         const pos = formatPosition(bot.entity?.position);
@@ -338,6 +483,10 @@ function handleCommand(bot, message) {
     else if (lowerMsg.includes('stop') || lowerMsg.includes('shutdown')) {
         bot.chat('Shutting down AFK bot...');
         gracefulShutdown(bot);
+    }
+    else if (lowerMsg.includes('auth') || lowerMsg.includes('login')) {
+        const status = isAuthMeAuthenticated ? 'Authenticated' : 'Not Authenticated';
+        bot.chat(`AuthMe Status: ${status}`);
     }
 }
 
@@ -379,14 +528,15 @@ function checkRuntime() {
 
     if (elapsedMinutes >= MAX_RUNTIME_MINUTES) {
         console.log(`[${getTimestamp()}] Runtime limit reached (${MAX_RUNTIME_MINUTES} minutes). Shutting down for restart...`);
-        gracefulShutdown(bot);
+        gracefulShutdown(botInstance);
         return;
     }
 
     // Log status every 10 minutes
     if (Math.floor(elapsedMinutes) % 10 === 0) {
         const remaining = MAX_RUNTIME_MINUTES - elapsedMinutes;
-        console.log(`[${getTimestamp()}] Runtime: ${Math.floor(elapsedMinutes)}min / ${MAX_RUNTIME_MINUTES}min (${Math.floor(remaining)}min remaining)`);
+        const authStatus = isAuthMeAuthenticated ? 'Authenticated' : 'Not Authenticated';
+        console.log(`[${getTimestamp()}] Runtime: ${Math.floor(elapsedMinutes)}min / ${MAX_RUNTIME_MINUTES}min (${Math.floor(remaining)}min remaining) | Auth: ${authStatus}`);
     }
 }
 
@@ -398,6 +548,7 @@ console.log(`Bot Username: ${BOT_USERNAME}`);
 console.log(`Server: ${SERVER_HOST}:${SERVER_PORT}`);
 console.log(`Version: ${SERVER_VERSION}`);
 console.log(`Max Runtime: ${MAX_RUNTIME_MINUTES} minutes (5h 50m)`);
+console.log(`AuthMe Support: ${AUTHME_PASSWORD ? 'Enabled' : 'Disabled'}`);
 console.log('==========================================');
 
 // Create bot
@@ -407,5 +558,5 @@ const bot = createBot();
 setInterval(checkRuntime, 60000); // Check every minute
 
 // Handle process signals
-process.on('SIGINT', () => gracefulShutdown(bot));
-process.on('SIGTERM', () => gracefulShutdown(bot));
+process.on('SIGINT', () => gracefulShutdown(botInstance));
+process.on('SIGTERM', () => gracefulShutdown(botInstance));
