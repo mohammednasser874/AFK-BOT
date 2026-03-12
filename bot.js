@@ -60,6 +60,21 @@ let lastActivityTime = Date.now();
 let isShuttingDown = false;
 let botInstance = null;
 
+// Reconnection management
+let isReconnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+let reconnectTimeout = null;
+
+// Get reconnection delay with exponential backoff
+function getReconnectDelay() {
+    // Base delay of 15 seconds, exponential up to 5 minutes
+    const baseDelay = 15000;
+    const maxDelay = 300000;
+    const delay = Math.min(baseDelay * Math.pow(1.5, reconnectAttempts), maxDelay);
+    return Math.floor(delay);
+}
+
 // Create bot instance
 function createBot() {
     const options = {
@@ -94,6 +109,14 @@ function createBot() {
         console.log(`[${getTimestamp()}] Server: ${SERVER_HOST}:${SERVER_PORT}`);
         console.log(`[${getTimestamp()}] Position: ${formatPosition(bot.entity.position)}`);
 
+        // Reset reconnection attempts on successful spawn
+        reconnectAttempts = 0;
+        isReconnecting = false;
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+        }
+
         originalPosition = bot.entity.position.clone();
 
         // Load mcData after spawn
@@ -124,6 +147,8 @@ function createBot() {
     // Error handling
     bot.on('error', (err) => {
         console.error(`[${getTimestamp()}] Bot error:`, err.message);
+        // Don't reconnect here - let 'end' or 'kicked' events handle it
+        // to avoid duplicate reconnection attempts
     });
 
     // Kicked from server
@@ -132,10 +157,15 @@ function createBot() {
         isAuthMeAuthenticated = false;
         authAttempts = 0;
         antiAfkStarted = false;
-        if (!isShuttingDown) {
-            console.log(`[${getTimestamp()}] Reconnecting in 10 seconds...`);
-            setTimeout(createBot, 10000);
+
+        // Check if it's a throttle message
+        const reasonStr = String(reason).toLowerCase();
+        if (reasonStr.includes('throttle') || reasonStr.includes('wait') || reasonStr.includes('rate limit')) {
+            reconnectAttempts = Math.min(reconnectAttempts + 2, MAX_RECONNECT_ATTEMPTS); // Penalize throttle more
+            console.log(`[${getTimestamp()}] Connection throttled. Increasing backoff.`);
         }
+
+        scheduleReconnect();
     });
 
     // End/Disconnect event
@@ -144,11 +174,37 @@ function createBot() {
         isAuthMeAuthenticated = false;
         authAttempts = 0;
         antiAfkStarted = false;
-        if (!isShuttingDown) {
-            console.log(`[${getTimestamp()}] Reconnecting in 10 seconds...`);
-            setTimeout(createBot, 10000);
-        }
+        scheduleReconnect();
     });
+
+    // Schedule a reconnect with lock to prevent multiple attempts
+    function scheduleReconnect() {
+        if (isShuttingDown) return;
+
+        // Clear any existing reconnect timeout
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+        }
+
+        if (isReconnecting) {
+            console.log(`[${getTimestamp()}] Reconnect already in progress, skipping...`);
+            return;
+        }
+
+        isReconnecting = true;
+        const delay = getReconnectDelay();
+        reconnectAttempts++;
+
+        console.log(`[${getTimestamp()}] Reconnecting in ${Math.round(delay/1000)} seconds... (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+
+        reconnectTimeout = setTimeout(() => {
+            isReconnecting = false;
+            if (!isShuttingDown) {
+                createBot();
+            }
+        }, delay);
+    }
 
     // Chat message handler - AuthMe detection and remote commands
     bot.on('message', (jsonMsg) => {
@@ -260,7 +316,7 @@ function handleAuthMeMessages(bot, message) {
         if (authAttempts >= MAX_AUTH_ATTEMPTS) {
             console.log(`[${getTimestamp()}] AuthMe: Max auth attempts reached. Reconnecting...`);
             bot.quit();
-            setTimeout(createBot, 10000);
+            // Let the 'end' event handle reconnection with proper backoff
         }
         return;
     }
@@ -561,14 +617,22 @@ function handleFalixMessages(bot, message) {
             bot.chat('Disconnecting to cancel stop timer...');
             console.log(`[${getTimestamp()}] Falix: Disconnecting now...`);
 
+            // Clear any existing reconnect timeout
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+
             // Disconnect
             bot.quit();
 
-            // Reconnect after 3 seconds
+            // Reconnect after 5 seconds (longer to avoid throttle)
             setTimeout(() => {
                 console.log(`[${getTimestamp()}] Falix: Reconnecting to cancel timer...`);
+                isReconnecting = false;
+                reconnectAttempts = 0;
                 createBot();
-            }, 3000);
+            }, 5000);
         }, 1000);
         return true;
     }
@@ -576,11 +640,20 @@ function handleFalixMessages(bot, message) {
     // Check if server is stopping now
     if (FALIX_PATTERNS.stoppingNow.some(pattern => pattern.test(message))) {
         console.log(`[${getTimestamp()}] Falix: Server is stopping! Will reconnect when back up...`);
+
+        // Clear any existing reconnect timeout
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+        }
+
         // Wait longer before reconnecting since server is actually stopping
         setTimeout(() => {
             console.log(`[${getTimestamp()}] Falix: Attempting to reconnect after shutdown...`);
+            isReconnecting = false;
+            reconnectAttempts = 0;
             createBot();
-        }, 30000); // Wait 30 seconds for server to restart
+        }, 45000); // Wait 45 seconds for server to restart
         return true;
     }
 
