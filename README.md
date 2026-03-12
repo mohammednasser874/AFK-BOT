@@ -89,7 +89,7 @@ The bot is pre-configured with these settings:
 
 ```javascript
 const BOT_USERNAME = 'COOLBOI';
-const SERVER_HOST = 'ahsmpw.falixsrv.me';
+const SERVER_HOST = 'Your Target Server';
 const SERVER_PORT = 29724;
 const SERVER_VERSION = '1.20.1';
 const AUTH_TYPE = 'offline';
