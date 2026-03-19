@@ -9,7 +9,7 @@ const path = require('path');
 const BOT_USERNAME    = process.env.BOT_USERNAME    || 'COOLBOI';
 const SERVER_HOST     = process.env.SERVER_HOST     || 'pathborn.falix.me';
 const SERVER_PORT     = parseInt(process.env.SERVER_PORT) || 24233;
-const SERVER_VERSION  = process.env.SERVER_VERSION  || '1.20.1';
+const SERVER_VERSION  = process.env.SERVER_VERSION  || '1.21.1';
 const AUTH_TYPE       = process.env.AUTH_TYPE       || 'offline';
 const MAX_RUNTIME_MIN = 340;
 const PASSWORD_FILE   = path.join(__dirname, '.bot_password');
@@ -24,18 +24,42 @@ let falixTimerPending = false;
 let botInstance       = null;
 
 // ── Password ──────────────────────────────────────────────────────
+// Password is loaded from:
+//   1. BOT_PASSWORD env var (set as GitHub Actions secret — most reliable)
+//   2. .bot_password file (GitHub Actions cache fallback)
+//   3. Generate a new one and save both to file and log it loudly
 function loadOrCreatePassword() {
+    // 1. Env var set by workflow from the saved secret
+    if (process.env.BOT_PASSWORD && process.env.BOT_PASSWORD.trim()) {
+        const pw = process.env.BOT_PASSWORD.trim();
+        // Always keep the file in sync so cache also has it
+        try { fs.writeFileSync(PASSWORD_FILE, pw); } catch {}
+        console.log('[Auth] Password loaded from BOT_PASSWORD env var.');
+        return pw;
+    }
+
+    // 2. Cache file from previous run
     if (fs.existsSync(PASSWORD_FILE)) {
         try {
             const pw = fs.readFileSync(PASSWORD_FILE, 'utf8').trim();
-            if (pw) { console.log('[Auth] Loaded saved password.'); return pw; }
+            if (pw) {
+                console.log('[Auth] Password loaded from cache file.');
+                return pw;
+            }
         } catch (e) { console.error('[Auth] Could not read password file:', e.message); }
     }
+
+    // 3. Generate brand new password
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let pw = '';
     for (let i = 0; i < 16; i++) pw += chars[Math.floor(Math.random() * chars.length)];
-    try { fs.writeFileSync(PASSWORD_FILE, pw); console.log('[Auth] Generated and saved new password.'); }
-    catch (e) { console.error('[Auth] Could not save password:', e.message); }
+    try { fs.writeFileSync(PASSWORD_FILE, pw); } catch (e) { console.error('[Auth] Could not save password file:', e.message); }
+
+    // Print clearly to logs so you can copy it into the GitHub secret
+    console.log('==========================================');
+    console.log('NEW PASSWORD GENERATED — SAVE THIS:');
+    console.log(`BOT_PASSWORD=${pw}`);
+    console.log('==========================================');
     return pw;
 }
 
@@ -243,151 +267,65 @@ function createBot() {
     }
 }
 
-// ── Meteor-style continuous roam movement ─────────────────────────
+// ── Pathfinder roam — picks random points near spawn and walks to them ──
 function startAntiAfk(bot) {
-    console.log('[AntiAFK] Meteor-style roam started.');
+    console.log('[AntiAFK] Pathfinder roam started.');
+
+    const { GoalXZ } = require('mineflayer-pathfinder').goals;
 
     // ── Non-movement routines ─────────────────────────────────────
     setInterval(() => { if (bot.entity) bot.swingArm(); }, randMs(12000, 35000));
+
     setInterval(() => {
         if (!bot.entity) return;
         bot.setControlState('sneak', true);
         setTimeout(() => bot.setControlState('sneak', false), 800 + Math.random() * 1200);
     }, randMs(60000, 150000));
 
-    // ── Block helpers ─────────────────────────────────────────────
-    const NON_SOLID = new Set([
-        'air','cave_air','void_air','water','lava','seagrass','tall_seagrass',
-        'grass','tall_grass','fern','large_fern','dead_bush','snow',
-        'poppy','dandelion','cornflower','oxeye_daisy','azure_bluet',
-        'rose_bush','peony','sunflower','lilac','vine','kelp','kelp_plant',
-        'bubble_column','torch','wall_torch','lantern','chain',
-        'tripwire','string','cobweb','sugar_cane','bamboo',
-        'wheat','carrots','potatoes','beetroots',
-    ]);
-    function solid(block) { return block && !NON_SOLID.has(block.name); }
-    function getBlock(x, y, z) {
-        try { return bot.blockAt({ x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) }); }
-        catch { return null; }
+    // ── Roam loop ─────────────────────────────────────────────────
+    // Record spawn position so the bot stays nearby
+    let spawnX = null;
+    let spawnZ = null;
+    let roaming = false;
+
+    function pickRandomGoal() {
+        const radius = 15;
+        const angle  = Math.random() * Math.PI * 2;
+        const dist   = 5 + Math.random() * radius;
+        const tx = Math.floor(spawnX + Math.cos(angle) * dist);
+        const tz = Math.floor(spawnZ + Math.sin(angle) * dist);
+        return new GoalXZ(tx, tz);
     }
 
-    // ── Roam state ────────────────────────────────────────────────
-    let roamYaw      = Math.random() * Math.PI * 2;
-    let paused       = false;
-    let jumpCooldown = false;
-    let lastPos      = null;
-    let lastPosTime  = Date.now();
+    async function roamStep() {
+        if (!bot.entity || roaming) return;
+        roaming = true;
 
-    function doJump() {
-        if (jumpCooldown) return;
-        jumpCooldown = true;
-        bot.setControlState('jump', true);
-        setTimeout(() => {
-            bot.setControlState('jump', false);
-            setTimeout(() => { jumpCooldown = false; }, 500);
-        }, 200);
+        const goal = pickRandomGoal();
+        console.log(`[Roam] Walking to ${goal.x}, ${goal.z}`);
+
+        try {
+            await bot.pathfinder.goto(goal);
+            console.log('[Roam] Reached goal.');
+        } catch (e) {
+            console.log(`[Roam] Could not reach goal — trying another.`);
+        }
+
+        roaming = false;
+
+        // Pause 2–5s between walks to look natural
+        setTimeout(roamStep, randMs(2000, 5000));
     }
 
-    // Pick a new random direction and face it, then resume walking
-    function changeDirection(reason) {
-        if (paused) return;
-        paused = true;
-        console.log(`[Roam] ${reason} — changing direction.`);
-
-        // Stop all movement keys
-        ['forward','back','left','right','jump'].forEach(k => bot.setControlState(k, false));
-
-        // New random yaw offset 90–180 degrees from current
-        const turn = (Math.PI * 0.5) + Math.random() * (Math.PI * 0.6);
-        roamYaw = roamYaw + turn * (Math.random() < 0.5 ? 1 : -1);
-
-        // Use physics.yaw to actually change the direction the server registers
-        bot.entity.yaw = roamYaw;
-
-        setTimeout(() => {
-            paused = false;
-            bot.setControlState('forward', true);
-        }, 350);
-    }
-
-    // ── Main tick ─────────────────────────────────────────────────
-    setInterval(() => {
-        if (!bot.entity || paused) return;
-
-        const pos = bot.entity.position;
-        const dx  = -Math.sin(roamYaw);
-        const dz  =  Math.cos(roamYaw);
-        const near = 0.85;
-        const far  = 1.3;
-
-        // HOLE — ground missing ahead
-        const gNear = getBlock(pos.x + dx * near, pos.y - 0.1, pos.z + dz * near);
-        const gFar  = getBlock(pos.x + dx * far,  pos.y - 0.1, pos.z + dz * far);
-        if (!solid(gNear) || !solid(gFar)) {
-            changeDirection('Hole ahead');
-            return;
-        }
-
-        // WALL — check 3 heights ahead
-        const foot = getBlock(pos.x + dx * near, pos.y + 0.1,  pos.z + dz * near);
-        const body = getBlock(pos.x + dx * near, pos.y + 0.8,  pos.z + dz * near);
-        const head = getBlock(pos.x + dx * near, pos.y + 1.6,  pos.z + dz * near);
-
-        if (solid(foot)) {
-            if (!solid(body) && !solid(head)) {
-                // Only 1 block high — jump over it
-                doJump();
-                console.log('[Roam] 1-block step — jumping.');
-            } else {
-                changeDirection('Wall/build ahead');
-            }
-            return;
-        }
-        if (solid(body) || solid(head)) {
-            changeDirection('Upper obstacle ahead');
-            return;
-        }
-
-        // STUCK — hasn't moved in 2.5s
-        if (lastPos) {
-            const dist = Math.hypot(pos.x - lastPos.x, pos.z - lastPos.z);
-            if (dist < 0.08 && Date.now() - lastPosTime > 2500) {
-                doJump();
-                changeDirection('Stuck');
-                lastPos = pos.clone();
-                lastPosTime = Date.now();
-                return;
-            }
-        }
-        if (!lastPos || Date.now() - lastPosTime > 1000) {
-            lastPos = pos.clone();
-            lastPosTime = Date.now();
-        }
-
-        // All clear — sync entity yaw so forward key moves the right way
-        bot.entity.yaw = roamYaw;
-        bot.setControlState('forward', true);
-
-    }, 100);
-
-    // Random direction change every 15–30s so it roams around, not back-and-forth
-    setInterval(() => {
-        if (!bot.entity || paused) return;
-        roamYaw = Math.random() * Math.PI * 2;
-        bot.entity.yaw = roamYaw;
-        console.log('[Roam] Periodic direction shuffle.');
-    }, randMs(15000, 30000));
-
-    // Kick off after 1.5s
+    // Start after spawn settles
     setTimeout(() => {
         if (!bot.entity) return;
-        roamYaw = Math.random() * Math.PI * 2;
-        bot.entity.yaw = roamYaw;
-        bot.setControlState('forward', true);
-        console.log('[Roam] Walking started.');
-    }, 1500);
+        spawnX = bot.entity.position.x;
+        spawnZ = bot.entity.position.z;
+        console.log(`[Roam] Spawn at ${Math.floor(spawnX)}, ${Math.floor(spawnZ)} — starting roam.`);
+        roamStep();
+    }, 3000);
 }
-
 // ── Runtime monitor ───────────────────────────────────────────────
 setInterval(() => {
     const mins = Math.floor((Date.now() - startTime) / 60000);
