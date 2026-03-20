@@ -143,10 +143,10 @@ function createBot() {
 
     bot.on('login', () => console.log('[Bot] Login OK.'));
 
-    // GrimAC setback — stop pathfinder, roam loop restarts itself
+    // GrimAC setback — just log it, pathfinder recovers on its own
+    // Stopping pathfinder here is what causes the "Path was stopped" error
     bot.on('forcedMove', () => {
-        console.log('[GrimAC] Setback detected — restarting pathfinder.');
-        try { bot.pathfinder.stop(); } catch {}
+        console.log('[GrimAC] Setback detected — letting pathfinder recover.');
     });
 
     // ── Chat ───────────────────────────────────────────────────────
@@ -363,7 +363,7 @@ function createBot() {
                 console.log(`[Roam] Failed (${e.message || e}) streak:${failStreak}`);
                 try { bot.pathfinder.stop(); } catch {}
 
-                if (failStreak >= 4 && bot.entity && roamActive) {
+                if (failStreak >= 6 && bot.entity && roamActive) {
                     console.log('[Roam] Nudging to unstick.');
                     const dirs = ['forward', 'back', 'left', 'right'];
                     const dir  = dirs[Math.floor(Math.random() * dirs.length)];
