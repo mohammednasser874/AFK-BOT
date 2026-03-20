@@ -1,20 +1,20 @@
-const mineflayer = require('mineflayer');
-const pathfinder = require('mineflayer-pathfinder').pathfinder;
-const Movements = require('mineflayer-pathfinder').Movements;
+const mineflayer  = require('mineflayer');
+const pathfinder  = require('mineflayer-pathfinder').pathfinder;
+const Movements   = require('mineflayer-pathfinder').Movements;
 const { GoalNear } = require('mineflayer-pathfinder').goals;
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 
 // ── Config ────────────────────────────────────────────────────────
-const BOT_USERNAME    = process.env.BOT_USERNAME    || 'COOLBOI';
-const SERVER_HOST     = process.env.SERVER_HOST     || 'pathborn.falix.me';
+const BOT_USERNAME    = process.env.BOT_USERNAME || 'COOLBOI';
+const SERVER_HOST     = process.env.SERVER_HOST  || 'pathborn.falix.me';
 const SERVER_PORT     = parseInt(process.env.SERVER_PORT) || 24233;
-const SERVER_VERSION  = process.env.SERVER_VERSION  || '1.21.1';
-const AUTH_TYPE       = process.env.AUTH_TYPE       || 'offline';
+const SERVER_VERSION  = process.env.SERVER_VERSION || '1.21.1';
+const AUTH_TYPE       = process.env.AUTH_TYPE    || 'offline';
 const MAX_RUNTIME_MIN = 340;
 const PASSWORD_FILE   = path.join(__dirname, '.bot_password');
 
-// ── Global state (persists across every reconnect) ────────────────
+// ── Global state ──────────────────────────────────────────────────
 const startTime       = Date.now();
 let isShuttingDown    = false;
 let isReconnecting    = false;
@@ -24,38 +24,23 @@ let falixTimerPending = false;
 let botInstance       = null;
 
 // ── Password ──────────────────────────────────────────────────────
-// Password is loaded from:
-//   1. BOT_PASSWORD env var (set as GitHub Actions secret — most reliable)
-//   2. .bot_password file (GitHub Actions cache fallback)
-//   3. Generate a new one and save both to file and log it loudly
 function loadOrCreatePassword() {
-    // 1. Env var set by workflow from the saved secret
     if (process.env.BOT_PASSWORD && process.env.BOT_PASSWORD.trim()) {
         const pw = process.env.BOT_PASSWORD.trim();
-        // Always keep the file in sync so cache also has it
         try { fs.writeFileSync(PASSWORD_FILE, pw); } catch {}
         console.log('[Auth] Password loaded from BOT_PASSWORD env var.');
         return pw;
     }
-
-    // 2. Cache file from previous run
     if (fs.existsSync(PASSWORD_FILE)) {
         try {
             const pw = fs.readFileSync(PASSWORD_FILE, 'utf8').trim();
-            if (pw) {
-                console.log('[Auth] Password loaded from cache file.');
-                return pw;
-            }
+            if (pw) { console.log('[Auth] Password loaded from cache file.'); return pw; }
         } catch (e) { console.error('[Auth] Could not read password file:', e.message); }
     }
-
-    // 3. Generate brand new password
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let pw = '';
     for (let i = 0; i < 16; i++) pw += chars[Math.floor(Math.random() * chars.length)];
-    try { fs.writeFileSync(PASSWORD_FILE, pw); } catch (e) { console.error('[Auth] Could not save password file:', e.message); }
-
-    // Print clearly to logs so you can copy it into the GitHub secret
+    try { fs.writeFileSync(PASSWORD_FILE, pw); } catch (e) { console.error('[Auth] Could not save password:', e.message); }
     console.log('==========================================');
     console.log('NEW PASSWORD GENERATED — SAVE THIS:');
     console.log(`BOT_PASSWORD=${pw}`);
@@ -65,31 +50,27 @@ function loadOrCreatePassword() {
 
 const AUTHME_PASSWORD = loadOrCreatePassword();
 
-// ── Reconnect helpers ─────────────────────────────────────────────
+// ── Reconnect ─────────────────────────────────────────────────────
 function getReconnectDelay() {
     return Math.min(15000 * Math.pow(1.5, reconnectAttempts), 300000);
 }
 
-function scheduleReconnect(falixTriggered = false, overrideDelayMs = null) {
+function scheduleReconnect(falixTriggered = false, overrideMs = null) {
     if (isShuttingDown) return;
     if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+    if (isReconnecting) { console.log('[Reconnect] Already scheduled.'); return; }
 
-    if (isReconnecting) {
-        console.log('[Reconnect] Already scheduled — skipping duplicate.');
-        return;
-    }
-
-    isReconnecting = true;
+    isReconnecting    = true;
     reconnectAttempts++;
 
-    const delay = overrideDelayMs !== null ? overrideDelayMs
-                : falixTriggered           ? 8000
-                :                            getReconnectDelay();
+    const delay = overrideMs !== null ? overrideMs
+                : falixTriggered      ? 8000
+                :                       getReconnectDelay();
 
-    const label = falixTriggered  ? ' (FalixNodes timer reset)'
-                : overrideDelayMs ? ' (server fully stopped)'
-                :                   '';
-    console.log(`[Reconnect] Attempt #${reconnectAttempts} in ${Math.round(delay / 1000)}s${label}`);
+    const label = falixTriggered ? ' (FalixNodes timer reset)'
+                : overrideMs     ? ' (server stopped)'
+                :                  '';
+    console.log(`[Reconnect] Attempt #${reconnectAttempts} in ${Math.round(delay/1000)}s${label}`);
 
     reconnectTimeout = setTimeout(() => {
         reconnectTimeout = null;
@@ -103,16 +84,31 @@ function createBot() {
     let isAuthenticated = false;
     let authAttempts    = 0;
     let antiAfkStarted  = false;
+    let roamActive      = false;
+    let roamTimers      = [];
     const MAX_AUTH      = 3;
+
+    // Stop ALL tasks instantly — called on kick/disconnect/death
+    function stopAllTasks() {
+        roamActive = false;
+        roamTimers.forEach(t => { try { clearTimeout(t); clearInterval(t); } catch {} });
+        roamTimers = [];
+        try { bot.pathfinder.stop(); } catch {}
+        try {
+            ['forward','back','left','right','jump','sneak','sprint']
+                .forEach(k => bot.setControlState(k, false));
+        } catch {}
+        console.log('[Tasks] All tasks stopped.');
+    }
 
     console.log(`[Bot] Connecting to ${SERVER_HOST}:${SERVER_PORT} as ${BOT_USERNAME}...`);
 
     const bot = mineflayer.createBot({
-        host:    SERVER_HOST,
-        port:    SERVER_PORT,
+        host:     SERVER_HOST,
+        port:     SERVER_PORT,
         username: BOT_USERNAME,
-        version: SERVER_VERSION,
-        auth:    AUTH_TYPE,
+        version:  SERVER_VERSION,
+        auth:     AUTH_TYPE,
         checkTimeoutInterval: 60000,
         hideErrors: false,
     });
@@ -122,27 +118,36 @@ function createBot() {
 
     // ── Spawn ──────────────────────────────────────────────────────
     bot.on('spawn', () => {
-        console.log(`[Bot] Spawned! Pos: ${fmtPos(bot.entity.position)}`);
+        console.log(`[Bot] Spawned at ${fmtPos(bot.entity.position)}`);
         reconnectAttempts = 0;
 
-        const mcData = require('minecraft-data')(bot.version);
+        const mcData    = require('minecraft-data')(bot.version);
         const movements = new Movements(bot, mcData);
-        movements.canDig          = false; // never break blocks
-        movements.canPlace        = false; // never place blocks
-        movements.allow1by1towers = false; // never pillar up
+        movements.canDig          = false;
+        movements.canPlace        = false;
+        movements.allow1by1towers = false;
+        movements.maxDropDown     = 2;
         bot.pathfinder.setMovements(movements);
 
-        setTimeout(() => {
+        // Wait up to 10s for AuthMe, then start anyway
+        const authTimeout = setTimeout(() => {
             if (!antiAfkStarted) {
-                console.log('[Auth] No AuthMe prompt detected — starting anti-AFK directly.');
+                console.log('[Auth] No AuthMe prompt — starting anti-AFK directly.');
                 isAuthenticated = true;
-                startAntiAfk(bot);
-                antiAfkStarted = true;
+                startAntiAfk();
+                antiAfkStarted  = true;
             }
-        }, 8000);
+        }, 10000);
+        roamTimers.push(authTimeout);
     });
 
-    bot.on('login', () => console.log('[Bot] Login acknowledged.'));
+    bot.on('login', () => console.log('[Bot] Login OK.'));
+
+    // GrimAC setback — stop pathfinder, roam loop restarts itself
+    bot.on('forcedMove', () => {
+        console.log('[GrimAC] Setback detected — restarting pathfinder.');
+        try { bot.pathfinder.stop(); } catch {}
+    });
 
     // ── Chat ───────────────────────────────────────────────────────
     bot.on('message', (jsonMsg) => {
@@ -153,16 +158,20 @@ function createBot() {
         handleCommand(msg);
     });
 
-    bot.on('error',  (err)    => console.error(`[Error] ${err.message}`));
+    bot.on('error', (err) => console.error(`[Error] ${err.message}`));
+
+    // Kick — stop tasks immediately, reconnect handled by 'end'
     bot.on('kicked', (reason) => {
         const r = String(reason);
         console.warn(`[Kicked] ${r}`);
+        stopAllTasks();
         if (/throttle|wait|rate.?limit/i.test(r)) reconnectAttempts += 2;
     });
 
-    // ── End — single reconnect entry point ────────────────────────
+    // End — always fires after kick/error/quit, handles reconnect
     bot.on('end', (reason) => {
         console.log(`[Disconnect] ${reason || 'unknown'}`);
+        stopAllTasks();
         antiAfkStarted  = false;
         isAuthenticated = false;
         const wasFalix  = falixTimerPending;
@@ -170,7 +179,10 @@ function createBot() {
         scheduleReconnect(wasFalix);
     });
 
-    bot.on('death', () => console.log('[Bot] Died — auto-respawning...'));
+    bot.on('death', () => {
+        console.log('[Bot] Died — respawning...');
+        try { bot.pathfinder.stop(); } catch {}
+    });
 
     // ── AuthMe ─────────────────────────────────────────────────────
     function handleAuthMe(msg) {
@@ -180,71 +192,97 @@ function createBot() {
         const ERR_RE = /wrong password|incorrect password|login failed|registration failed/i;
 
         if (OK_RE.test(msg)) {
-            console.log('[Auth] Authenticated successfully!');
+            console.log('[Auth] Authenticated!');
             isAuthenticated = true;
             authAttempts    = 0;
-            setTimeout(() => { if (!antiAfkStarted) { startAntiAfk(bot); antiAfkStarted = true; } }, 2000);
+            const t = setTimeout(() => {
+                if (!antiAfkStarted) { startAntiAfk(); antiAfkStarted = true; }
+            }, 2000);
+            roamTimers.push(t);
             return;
         }
         if (ERR_RE.test(msg)) {
-            console.warn(`[Auth] Auth error: ${msg}`);
+            console.warn(`[Auth] Error: ${msg}`);
             if (++authAttempts >= MAX_AUTH) { console.log('[Auth] Too many failures — reconnecting.'); bot.quit(); }
             return;
         }
         if (REG_RE.test(msg) && authAttempts < MAX_AUTH) {
-            setTimeout(() => {
+            const t = setTimeout(() => {
                 if (!isAuthenticated) {
                     bot.chat(`/register ${AUTHME_PASSWORD} ${AUTHME_PASSWORD}`);
                     console.log('[Auth] Sent /register');
                     authAttempts++;
                 }
             }, 2000 + Math.random() * 2000);
+            roamTimers.push(t);
             return;
         }
         if (LOG_RE.test(msg) && authAttempts < MAX_AUTH) {
-            setTimeout(() => {
+            const t = setTimeout(() => {
                 if (!isAuthenticated) {
                     bot.chat(`/login ${AUTHME_PASSWORD}`);
                     console.log('[Auth] Sent /login');
                     authAttempts++;
                 }
             }, 2000 + Math.random() * 2000);
+            roamTimers.push(t);
         }
     }
 
     // ── FalixNodes ─────────────────────────────────────────────────
     const FALIX_AFK = [
-        /are you here\??/i, /are you still there\??/i, /afk.?check/i,
-        /confirm you are here/i, /type.*to confirm/i,
+        /are you here/i,
+        /are you still there/i,
+        /afk.?check/i,
+        /confirm you are here/i,
+        /still (here|active|playing)/i,
+        /type.*to (confirm|stay)/i,
+        /respond.*or.*kick/i,
+        /you.*there\?/i,
     ];
     const FALIX_TIMER = [
-        /server will stop in/i, /server stopping in/i, /shutting down in/i,
-        /stop.*timer/i, /auto.?stop/i, /will.*stop.*\d+\s*(second|minute)/i,
+        /server will stop in/i,
+        /server stopping in/i,
+        /shutting down in/i,
+        /stop.*timer/i,
+        /auto.?stop/i,
+        /will.*stop.*\d+\s*(second|minute)/i,
+        /stopping.*\d+\s*(second|minute)/i,
     ];
     const FALIX_NOW = [
-        /server is stopping/i, /shutting down now/i, /server closed/i,
+        /server is stopping/i,
+        /shutting down now/i,
+        /server closed/i,
+        /server.*stopped/i,
     ];
 
     function handleFalix(msg) {
         if (FALIX_AFK.some(p => p.test(msg))) {
-            const replies = ['yes', 'yeah', 'here', 'present', 'yep', 'yes im here', 'not afk'];
-            setTimeout(() => {
+            const replies = [
+                'yes', 'yeah', 'here', 'present', 'yep',
+                'yes im here', 'not afk', 'im here', 'yep still here',
+            ];
+            const t = setTimeout(() => {
                 try { bot.chat(replies[Math.floor(Math.random() * replies.length)]); } catch {}
                 console.log('[FalixNodes] Responded to AFK check.');
             }, 1000 + Math.random() * 2000);
+            roamTimers.push(t);
             return true;
         }
         if (FALIX_TIMER.some(p => p.test(msg))) {
             if (falixTimerPending) return true;
-            console.log('[FalixNodes] Stop-timer detected — disconnecting to reset it...');
+            console.log('[FalixNodes] Stop-timer — disconnecting to reset...');
             falixTimerPending = true;
-            setTimeout(() => {
+            stopAllTasks();
+            const t = setTimeout(() => {
                 try { bot.quit('FalixNodes timer reset'); } catch {}
             }, 500);
+            roamTimers.push(t);
             return true;
         }
         if (FALIX_NOW.some(p => p.test(msg))) {
-            console.log('[FalixNodes] Server shutting down — waiting 45s before rejoining...');
+            console.log('[FalixNodes] Server stopping — waiting 45s...');
+            stopAllTasks();
             if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
             isReconnecting = true;
             reconnectTimeout = setTimeout(() => {
@@ -263,102 +301,96 @@ function createBot() {
         const lower = msg.toLowerCase();
         if (lower.includes('status')) {
             const mins = Math.floor((Date.now() - startTime) / 60000);
-            try { bot.chat(`Up ${mins}m | HP:${Math.round(bot.health ?? 0)} | Auth:${isAuthenticated} | Reconnects:${reconnectAttempts}`); } catch {}
+            try { bot.chat(`Up ${mins}m | HP:${Math.round(bot.health ?? 0)} | Auth:${isAuthenticated}`); } catch {}
         } else if (lower.includes('stop') || lower.includes('shutdown')) {
             try { bot.chat('Shutting down...'); } catch {}
             gracefulShutdown();
         }
     }
-}
 
-// ── Pathfinder roam — picks random points near spawn and walks to them ──
-function startAntiAfk(bot) {
-    console.log('[AntiAFK] Pathfinder roam started.');
+    // ── Anti-AFK / Roam ───────────────────────────────────────────
+    function startAntiAfk() {
+        if (roamActive) return;
+        roamActive = true;
+        console.log('[AntiAFK] Starting.');
 
-    const { GoalNear } = require('mineflayer-pathfinder').goals;
+        // Arm swing every 15–40s
+        const swingInt = setInterval(() => {
+            if (!bot.entity || !roamActive) return;
+            bot.swingArm();
+        }, randMs(15000, 40000));
+        roamTimers.push(swingInt);
 
-    // ── Non-movement routines ─────────────────────────────────────
-    setInterval(() => { if (bot.entity) bot.swingArm(); }, randMs(12000, 35000));
+        // Crouch toggle every 90–180s
+        const crouchInt = setInterval(() => {
+            if (!bot.entity || !roamActive) return;
+            bot.setControlState('sneak', true);
+            const t = setTimeout(() => {
+                try { bot.setControlState('sneak', false); } catch {}
+            }, 800 + Math.random() * 1000);
+            roamTimers.push(t);
+        }, randMs(90000, 180000));
+        roamTimers.push(crouchInt);
 
-    setInterval(() => {
-        if (!bot.entity) return;
-        bot.setControlState('sneak', true);
-        setTimeout(() => bot.setControlState('sneak', false), 800 + Math.random() * 1200);
-    }, randMs(60000, 150000));
+        // Record spawn center for radius clamping
+        const spawnX = bot.entity.position.x;
+        const spawnZ = bot.entity.position.z;
+        console.log(`[Roam] Spawn center: ${Math.floor(spawnX)}, ${Math.floor(spawnZ)}`);
 
-    // ── Roam loop ─────────────────────────────────────────────────
-    let spawnX  = null;
-    let spawnZ  = null;
-    let roaming = false;
-    let failStreak = 0; // how many goals in a row failed
+        let failStreak = 0;
 
-    function pickGoal() {
-        // Tight radius — spawn is a small skyblock island with void edges
-        // Never go more than 6 blocks from spawn center to stay safe
-        const radius = 6;
-        const angle  = Math.random() * Math.PI * 2;
-        const dist   = 1 + Math.random() * radius;
-        const tx = spawnX + Math.cos(angle) * dist;
-        const tz = spawnZ + Math.sin(angle) * dist;
-        const ty = bot.entity.position.y;
-        return new GoalNear(tx, ty, tz, 1);
-    }
-
-    async function roamStep() {
-        if (!bot.entity || roaming) return;
-        roaming = true;
-
-        const goal = pickGoal();
-        console.log(`[Roam] Walking to ~${Math.floor(goal.x)}, ${Math.floor(goal.z)}`);
-
-        try {
-            await bot.pathfinder.goto(goal);
-            console.log('[Roam] Reached goal.');
-            failStreak = 0;
-        } catch (e) {
-            failStreak++;
-            const reason = e.message || String(e);
-
-            // Pathfinder throws when it needs to dig but can't — treat as blocked
-            if (/dig|break|block|no path/i.test(reason)) {
-                console.log(`[Roam] Path blocked (${reason}) — picking new direction.`);
-            } else {
-                console.log(`[Roam] Could not reach goal (${reason}) — trying another.`);
-            }
-
-            bot.pathfinder.stop();
-
-            // After 4 fails nudge manually to get unstuck
-            if (failStreak >= 4) {
-                console.log('[Roam] Nudging to get unstuck.');
-                const dirs = ['forward', 'back', 'left', 'right'];
-                const dir  = dirs[Math.floor(Math.random() * dirs.length)];
-                bot.setControlState(dir, true);
-                await new Promise(r => setTimeout(r, 700));
-                bot.setControlState(dir, false);
-                failStreak = 0;
-            }
+        function pickGoal() {
+            // 6 block max radius — safe for the skyblock island
+            const angle = Math.random() * Math.PI * 2;
+            const dist  = 1.5 + Math.random() * 4.5;
+            const tx    = spawnX + Math.cos(angle) * dist;
+            const tz    = spawnZ + Math.sin(angle) * dist;
+            return new GoalNear(tx, bot.entity.position.y, tz, 1);
         }
 
-        roaming = false;
-        // Pause 1–3s between walks
-        setTimeout(roamStep, randMs(1000, 3000));
-    }
+        async function roamStep() {
+            if (!bot.entity || !roamActive) return;
 
-    // Start after spawn settles
-    setTimeout(() => {
-        if (!bot.entity) return;
-        spawnX = bot.entity.position.x;
-        spawnZ = bot.entity.position.z;
-        console.log(`[Roam] Spawn at ${Math.floor(spawnX)}, ${Math.floor(spawnZ)} — starting roam.`);
-        roamStep();
-    }, 3000);
+            const goal = pickGoal();
+            console.log(`[Roam] Walking to ${Math.floor(goal.x)}, ${Math.floor(goal.z)}`);
+
+            try {
+                await bot.pathfinder.goto(goal);
+                console.log('[Roam] Reached.');
+                failStreak = 0;
+            } catch (e) {
+                failStreak++;
+                console.log(`[Roam] Failed (${e.message || e}) streak:${failStreak}`);
+                try { bot.pathfinder.stop(); } catch {}
+
+                if (failStreak >= 4 && bot.entity && roamActive) {
+                    console.log('[Roam] Nudging to unstick.');
+                    const dirs = ['forward', 'back', 'left', 'right'];
+                    const dir  = dirs[Math.floor(Math.random() * dirs.length)];
+                    try { bot.setControlState(dir, true); } catch {}
+                    await sleep(600);
+                    try { bot.setControlState(dir, false); } catch {}
+                    failStreak = 0;
+                }
+            }
+
+            if (!roamActive) return;
+
+            // Human-like pause 2–6s between walks
+            const t = setTimeout(roamStep, randMs(2000, 6000));
+            roamTimers.push(t);
+        }
+
+        const startT = setTimeout(roamStep, 2000);
+        roamTimers.push(startT);
+    }
 }
+
 // ── Runtime monitor ───────────────────────────────────────────────
 setInterval(() => {
     const mins = Math.floor((Date.now() - startTime) / 60000);
     if (mins >= MAX_RUNTIME_MIN) {
-        console.log(`[Runtime] ${MAX_RUNTIME_MIN}m limit reached — shutting down for workflow restart.`);
+        console.log(`[Runtime] ${MAX_RUNTIME_MIN}m limit — shutting down.`);
         gracefulShutdown();
     } else if (mins > 0 && mins % 10 === 0) {
         console.log(`[Runtime] ${mins}/${MAX_RUNTIME_MIN} min elapsed.`);
@@ -369,20 +401,21 @@ setInterval(() => {
 function gracefulShutdown() {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    console.log('[Bot] Graceful shutdown initiated.');
+    console.log('[Bot] Graceful shutdown.');
     if (reconnectTimeout) clearTimeout(reconnectTimeout);
     try { botInstance?.quit('Graceful shutdown'); } catch {}
     setTimeout(() => process.exit(0), 1500);
 }
 
-process.on('SIGINT',  gracefulShutdown);
-process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT',             gracefulShutdown);
+process.on('SIGTERM',            gracefulShutdown);
 process.on('uncaughtException',  (e) => console.error('[Uncaught]',  e.message));
 process.on('unhandledRejection', (r) => console.error('[Rejection]', r));
 
 // ── Helpers ───────────────────────────────────────────────────────
 function randMs(min, max) { return Math.floor(Math.random() * (max - min)) + min; }
-function fmtPos(p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : 'unknown'; }
+function fmtPos(p)        { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : 'unknown'; }
+function sleep(ms)        { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Start ─────────────────────────────────────────────────────────
 console.log('==========================================');
