@@ -1,4 +1,4 @@
-# FalixNodes AFK Bot (COOLBOI)
+# AFK Bot (COOLBOI) 
 
 An advanced Minecraft AFK bot specifically optimized for **FalixNodes** servers. Runs on GitHub Actions with powerful anti-AFK protection, automatic AuthMe authentication, and FalixNodes-specific features.
 
@@ -8,20 +8,12 @@ An advanced Minecraft AFK bot specifically optimized for **FalixNodes** servers.
 - **Bot Name**: `COOLBOI` (fixed)
 - **Target Server**: `Your Target server`
 - **Auto-Register/Login**: Automatically handles AuthMe `/register` and `/login`
-- **Persistent Password**: Password is saved and reused between sessions (via GitHub Cache)
+- **Persistent Password**: You have to make a github secrete for the bot password which will get generated when the bot joins a server (1st time only)
 
-### FalixNodes Specific Features
-- **"Are You Here?" Detection**: Automatically responds to FalixNodes AFK checks
-- **Stop Timer Cancel**: Detects server stop timers and leaves/rejoins to cancel them
-- **FalixNodes Optimized**: Anti-AFK designed specifically for FalixNodes kick patterns
 
 ### Anti-AFK Protection
-- Random arm swinging every 15-45 seconds
-- Head rotation every 20-60 seconds
-- Small movements every 30-90 seconds
-- Random jumping every 60-180 seconds
-- Continuous subtle head movements
-- Pathfinding to random nearby positions
+- Moves to a random place
+- smart edge detector
 
 ### Auto Management
 - **Auto-Reconnect**: Reconnects if disconnected or kicked
@@ -34,14 +26,13 @@ An advanced Minecraft AFK bot specifically optimized for **FalixNodes** servers.
 
 1. **Scheduled Runs**: The workflow runs automatically every 5 hours
 2. **Auto-Restart**: When a run completes, it automatically triggers a new one after 5 minutes
-3. **Password Persistence**: The bot's password is cached between runs using GitHub Actions Cache
 4. **Timeout Protection**: Hard timeout at 5h 40m to ensure clean restarts
 
 ### Manual Trigger
 
 You can manually trigger the bot:
 1. Go to **Actions** tab
-2. Select **"FalixNodes AFK Bot"**
+2. Select **"AFK Bot"**
 3. Click **"Run workflow"**
 
 ## Bot Behavior
@@ -51,25 +42,19 @@ You can manually trigger the bot:
 2. AuthMe prompts to `/register`
 3. Bot generates a random 16-character password
 4. Sends: `/register <password> <password>`
-5. Password is saved to cache for future logins
 
 ### Subsequent Joins (Login)
 1. Bot joins as `COOLBOI`
 2. AuthMe prompts to `/login`
-3. Bot loads the saved password from cache
+3. Bot loads the saved password
 4. Sends: `/login <password>`
-
-### "Are You Here?" Response
-When FalixNodes sends "Are you here?" or similar AFK check:
-- Bot randomly responds with: `yes`, `yeah`, `here`, `present`, `yep`, `yes im here`, or `not afk`
-- Response is delayed 1-3 seconds to appear natural
 
 ### Stop Timer Detection
 When server announces a stop timer:
 1. Bot immediately sends a chat message
 2. Disconnects from server
-3. Waits 3 seconds
-4. Reconnects (this cancels the stop timer on FalixNodes)
+3. Waits
+4. Reconnects
 
 ## File Structure
 
@@ -90,9 +75,9 @@ The bot is pre-configured with these settings:
 ```javascript
 const BOT_USERNAME = 'COOLBOI';
 const SERVER_HOST = 'Your Target Server';
-const SERVER_PORT = 29724;
-const SERVER_VERSION = '1.20.1';
-const AUTH_TYPE = 'offline';
+const SERVER_PORT = 
+const SERVER_VERSION = 
+const AUTH_TYPE = 
 const MAX_RUNTIME_MINUTES = 340; // 5h 40m
 ```
 
@@ -122,7 +107,6 @@ Anti-AFK Routines Active
     |
     v
 Watch for:
-  - "Are you here?" -> Respond
   - Stop Timer -> Leave/Rejoin
   - Disconnect -> Reconnect
     |
@@ -146,17 +130,14 @@ Repeat
 
 View bot activity:
 1. Go to **Actions** tab in GitHub
-2. Click on the latest **"FalixNodes AFK Bot"** run
+2. Click on the latest **"AFK Bot"** run
 3. View the logs in real-time
 
 Log output shows:
 - Connection status
 - AuthMe authentication steps
 - Anti-AFK actions performed
-- "Are you here?" responses
-- Stop timer detections
-- Runtime progress
-
+  
 ## Troubleshooting
 
 ### Bot not joining
@@ -177,7 +158,7 @@ Log output shows:
 
 - GitHub repository (public or private)
 - GitHub Actions enabled (free tier works)
-- No additional secrets needed (all config is hardcoded)
+- additional secrets needed only the github_secrete and the bot's password if the server has authme plugin
 
 ## Notes
 
@@ -196,6 +177,4 @@ Log output shows:
 
 MIT
 
-## Credits
-
-Built with [Mineflayer](https://github.com/PrismarineJS/mineflayer) - Minecraft bot framework for Node.js
+## Doesn't work if the hoster is blocking bots IP
