@@ -144,6 +144,7 @@ Log output shows:
 - Check if the server IP/port is correct
 - Verify the server is online
 - Check Actions logs for errors
+- check if the hoster doesn't block the i bot's ip
 
 ### AuthMe issues
 - Password is cached; if registration failed, clear the cache
