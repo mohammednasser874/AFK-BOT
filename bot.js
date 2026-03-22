@@ -88,8 +88,14 @@ function createBot() {
     let roamTimers      = [];
     const MAX_AUTH      = 3;
 
+    // Session ID — incremented every time tasks stop
+    // Any async callback checks its captured sessionId against current
+    // If they don't match the callback is from a dead session and bails out
+    let sessionId = 0;
+
     // Stop ALL tasks instantly — called on kick/disconnect/death
     function stopAllTasks() {
+        sessionId++;          // invalidate all pending callbacks immediately
         roamActive = false;
         roamTimers.forEach(t => { try { clearTimeout(t); clearInterval(t); } catch {} });
         roamTimers = [];
@@ -349,6 +355,10 @@ function createBot() {
         }
 
         async function roamStep() {
+            // Capture session at start — if stopAllTasks() runs mid-await,
+            // sessionId increments and this callback knows to bail out
+            const mySession = sessionId;
+
             if (!bot.entity || !roamActive) return;
 
             const goal = pickGoal();
@@ -356,25 +366,39 @@ function createBot() {
 
             try {
                 await bot.pathfinder.goto(goal);
+                // After await — check if we're still in the same session
+                if (sessionId !== mySession || !roamActive) return;
                 console.log('[Roam] Reached.');
                 failStreak = 0;
             } catch (e) {
+                if (sessionId !== mySession || !roamActive) return;
+                const reason = e.message || String(e);
+
+                // GrimAC setback — not a real failure, just retry
+                if (/path was stopped/i.test(reason)) {
+                    console.log('[Roam] Path interrupted by setback — retrying.');
+                    const t = setTimeout(roamStep, 500);
+                    roamTimers.push(t);
+                    return;
+                }
+
                 failStreak++;
-                console.log(`[Roam] Failed (${e.message || e}) streak:${failStreak}`);
+                console.log(`[Roam] Failed (${reason}) streak:${failStreak}`);
                 try { bot.pathfinder.stop(); } catch {}
 
-                if (failStreak >= 6 && bot.entity && roamActive) {
+                if (failStreak >= 4 && bot.entity && roamActive) {
                     console.log('[Roam] Nudging to unstick.');
                     const dirs = ['forward', 'back', 'left', 'right'];
                     const dir  = dirs[Math.floor(Math.random() * dirs.length)];
                     try { bot.setControlState(dir, true); } catch {}
                     await sleep(600);
+                    if (sessionId !== mySession || !roamActive) return;
                     try { bot.setControlState(dir, false); } catch {}
                     failStreak = 0;
                 }
             }
 
-            if (!roamActive) return;
+            if (sessionId !== mySession || !roamActive) return;
 
             // Human-like pause 2–6s between walks
             const t = setTimeout(roamStep, randMs(2000, 6000));
