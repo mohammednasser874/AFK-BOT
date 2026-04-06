@@ -1,4 +1,4 @@
-# AFK Bot (COOLBOI)  V1.5
+# AFK Bot (COOLBOI)  V1.7
 
 An advanced Minecraft AFK bot specifically optimized for servers. Runs on GitHub Actions with powerful anti-AFK protection, automatic AuthMe authentication.
 
