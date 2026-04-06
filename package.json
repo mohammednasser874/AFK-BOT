@@ -1,18 +1,19 @@
 {
-  "name": "falixnodes-afk-bot",
-  "version": "2.0.0",
-  "description": "AFK Bot for FalixNodes Minecraft servers with advanced anti-AFK protection",
+  "name": "coolboi-afk-bot",
+  "version": "3.0.0",
+  "description": "COOLBOI AFK Bot for Minecraft SMPs with follow, combat, and inventory features",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
     "coolboi": "BOT_USERNAME=COOLBOI node bot.js"
   },
-  "keywords": ["minecraft", "afk", "bot", "mineflayer", "falixnodes"],
+  "keywords": ["minecraft", "afk", "bot", "mineflayer", "lifesteal", "smp"],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "mineflayer": "^4.20.0",
     "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-auto-eat": "^4.0.1",
     "minecraft-data": "^3.65.0"
   }
 }
