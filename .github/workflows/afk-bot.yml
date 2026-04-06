@@ -1,5 +1,4 @@
 name: FalixNodes AFK Bot
-
 on:
   schedule:
     - cron: '0 */5 * * *'
@@ -10,31 +9,25 @@ on:
         description: 'Reason for manual trigger'
         required: false
         default: 'Manual run'
-
 concurrency:
   group: afk-bot
   cancel-in-progress: false
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 345
     # Only run if BOT_ENABLED variable is true
     if: vars.BOT_ENABLED == 'true'
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '20'
-
     - name: Install dependencies
       run: |
-        npm install mineflayer mineflayer-pathfinder minecraft-data
-
+        npm install mineflayer mineflayer-pathfinder minecraft-data mineflayer-auto-eat
     - name: Restore bot password
       uses: actions/cache@v4
       with:
@@ -42,13 +35,12 @@ jobs:
         key: bot-password-${{ github.repository }}
         restore-keys: |
           bot-password-
-
     - name: Run AFK Bot
       timeout-minutes: 340
       env:
         BOT_USERNAME: COOLBOI
-        SERVER_HOST: pathborn.falix.me
-        SERVER_PORT: 24233
+        SERVER_HOST: play.voidsmp.space
+        SERVER_PORT: 25565
         SERVER_VERSION: 1.21.1
         AUTH_TYPE: offline
         BOT_PASSWORD: ${{ secrets.BOT_PASSWORD }}
@@ -56,20 +48,16 @@ jobs:
         echo "=========================================="
         echo "       Starting COOLBOI AFK Bot          "
         echo "=========================================="
-        echo "Server: pathborn.falix.me:24233"
+        echo "Server: play.voidsmp.space:25565"
         echo "Bot Name: COOLBOI"
         echo "Max Runtime: 5 hours 40 minutes"
         echo "=========================================="
-
         (sleep $((5*3600 + 40*60)) && echo "TIMEOUT: 5h 40m reached. Stopping..." && pkill -f "node bot.js" || true) &
         TIMEOUT_PID=$!
-
         node bot.js
         EXIT_CODE=$?
-
         kill $TIMEOUT_PID 2>/dev/null || true
         echo "Bot exited with code: $EXIT_CODE"
-
     - name: Save bot password for next run
       uses: actions/cache@v4
       if: always()
@@ -78,7 +66,6 @@ jobs:
         key: bot-password-${{ github.repository }}-${{ github.run_id }}
         restore-keys: |
           bot-password-${{ github.repository }}-
-
     - name: Upload logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -88,7 +75,6 @@ jobs:
           *.log
           .bot_password
         retention-days: 7
-
   restart-bot:
     runs-on: ubuntu-latest
     needs: run-bot
@@ -98,7 +84,6 @@ jobs:
     - name: Check if bot should restart
       run: |
         echo "BOT_ENABLED is true — scheduling restart in 5 minutes..."
-
     - name: Trigger new workflow run
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
