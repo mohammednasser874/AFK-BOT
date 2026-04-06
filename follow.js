@@ -134,16 +134,70 @@ module.exports = function attachFollow(bot, {
 
     setInterval(equipTotem, 10000);
 
+    // ── Protected area detection ──────────────────────────────────
+    let inProtectedArea  = false;
+    let protectedTimer   = null;
+    let lastProtectedPos = null;
+
+    const PROTECTION_PATTERNS = [
+        /you can't (do that|build|break|attack) here/i,
+        /this area is protected/i,
+        /you don't have permission/i,
+        /protected (region|zone|area)/i,
+        /worldguard/i,
+        /grief prevention/i,
+        /land is claimed/i,
+        /you are not allowed/i,
+        /pvp is disabled/i,
+        /pvp.*not allowed/i,
+        /no pvp/i,
+        /safe ?zone/i,
+        /spawn protection/i,
+        /cannot attack/i,
+        /can't attack/i,
+        /combat.*disabled/i,
+        /fighting.*not allowed/i,
+    ];
+
+    bot.on('message', (jsonMsg) => {
+        const msg = jsonMsg.toString();
+        if (PROTECTION_PATTERNS.some(p => p.test(msg))) {
+            if (!inProtectedArea) {
+                console.log('[Combat] Protected area detected — attacks disabled.');
+                inProtectedArea  = true;
+                lastProtectedPos = bot.entity?.position.clone() || null;
+            }
+            // Reset 10s exit timer every time we see a protection message
+            clearTimeout(protectedTimer);
+            protectedTimer = setTimeout(() => {
+                inProtectedArea = false;
+                console.log('[Combat] Protection timeout cleared — attacks re-enabled.');
+            }, 10000);
+        }
+    });
+
+    // If bot moves >20 blocks from where protection triggered, clear flag
+    setInterval(() => {
+        if (!inProtectedArea || !bot.entity || !lastProtectedPos) return;
+        if (bot.entity.position.distanceTo(lastProtectedPos) > 20) {
+            inProtectedArea  = false;
+            lastProtectedPos = null;
+            clearTimeout(protectedTimer);
+            console.log('[Combat] Moved out of protected area — attacks re-enabled.');
+        }
+    }, 5000);
+
     // ── Auto-attack ───────────────────────────────────────────────
     function startCombat() {
         if (combatInt) return;
 
         combatInt = setInterval(() => {
             if (!bot.entity) return;
+            if (inProtectedArea) return;   // no attacking in protected zones
 
-            // Find nearest player not in friendlist
-            let nearest = null;
-            let nearestDist = 4.5;  // attack range
+            let nearest     = null;
+            let nearestDist = 4.5;
+            let nearestName = null;
 
             for (const [username, player] of Object.entries(bot.players)) {
                 if (!player.entity) continue;
@@ -153,7 +207,8 @@ module.exports = function attachFollow(bot, {
                 const dist = bot.entity.position.distanceTo(player.entity.position);
                 if (dist < nearestDist) {
                     nearestDist = dist;
-                    nearest = player.entity;
+                    nearest     = player.entity;
+                    nearestName = username;
                 }
             }
 
@@ -161,10 +216,10 @@ module.exports = function attachFollow(bot, {
                 try {
                     bot.lookAt(nearest.position.offset(0, nearest.height, 0));
                     bot.attack(nearest);
-                    console.log(`[Combat] Attacked ${nearest.username || 'player'} (${Math.floor(nearestDist)}m)`);
+                    console.log(`[Combat] Attacked ${nearestName} (${Math.floor(nearestDist)}m)`);
                 } catch {}
             }
-        }, 600);  // ~1 attack per 0.6s (human-ish, not spam)
+        }, 600);
     }
 
     function stopCombat() {
