@@ -4,15 +4,17 @@ const Movements   = require('mineflayer-pathfinder').Movements;
 const { GoalNear } = require('mineflayer-pathfinder').goals;
 const fs   = require('fs');
 const path = require('path');
+const attachFollow = require('./follow');  // ← follow module
 
 // ── Config ────────────────────────────────────────────────────────
 const BOT_USERNAME    = process.env.BOT_USERNAME || 'COOLBOI';
-const SERVER_HOST     = process.env.SERVER_HOST  || 'pathborn.falix.me';
-const SERVER_PORT     = parseInt(process.env.SERVER_PORT) || 24233;
+const SERVER_HOST     = process.env.SERVER_HOST  || 'play.voidsmp.space';  // ← updated
+const SERVER_PORT     = parseInt(process.env.SERVER_PORT) || 25565;
 const SERVER_VERSION  = process.env.SERVER_VERSION || '1.21.1';
 const AUTH_TYPE       = process.env.AUTH_TYPE    || 'offline';
 const MAX_RUNTIME_MIN = 340;
 const PASSWORD_FILE   = path.join(__dirname, '.bot_password');
+const OWNER_NAME      = 'Binwalk';  // ← YOUR NAME HERE (change if your IGN is different)
 
 // ── Global state ──────────────────────────────────────────────────
 const startTime       = Date.now();
@@ -88,14 +90,10 @@ function createBot() {
     let roamTimers      = [];
     const MAX_AUTH      = 3;
 
-    // Session ID — incremented every time tasks stop
-    // Any async callback checks its captured sessionId against current
-    // If they don't match the callback is from a dead session and bails out
     let sessionId = 0;
 
-    // Stop ALL tasks instantly — called on kick/disconnect/death
     function stopAllTasks() {
-        sessionId++;          // invalidate all pending callbacks immediately
+        sessionId++;
         roamActive = false;
         roamTimers.forEach(t => { try { clearTimeout(t); clearInterval(t); } catch {} });
         roamTimers = [];
@@ -122,6 +120,16 @@ function createBot() {
     botInstance = bot;
     bot.loadPlugin(pathfinder);
 
+    // ── Wire follow module ─────────────────────────────────────────
+    const followControls = attachFollow(bot, {
+        ownerName:   OWNER_NAME,
+        stopAllTasks,
+        startAntiAfk,
+        roamTimers,
+        sleep,
+        randMs,
+    });
+
     // ── Spawn ──────────────────────────────────────────────────────
     bot.on('spawn', () => {
         console.log(`[Bot] Spawned at ${fmtPos(bot.entity.position)}`);
@@ -135,7 +143,6 @@ function createBot() {
         movements.maxDropDown     = 2;
         bot.pathfinder.setMovements(movements);
 
-        // Wait up to 10s for AuthMe, then start anyway
         const authTimeout = setTimeout(() => {
             if (!antiAfkStarted) {
                 console.log('[Auth] No AuthMe prompt — starting anti-AFK directly.');
@@ -149,8 +156,6 @@ function createBot() {
 
     bot.on('login', () => console.log('[Bot] Login OK.'));
 
-    // GrimAC setback — just log it, pathfinder recovers on its own
-    // Stopping pathfinder here is what causes the "Path was stopped" error
     bot.on('forcedMove', () => {
         console.log('[GrimAC] Setback detected — letting pathfinder recover.');
     });
@@ -166,7 +171,6 @@ function createBot() {
 
     bot.on('error', (err) => console.error(`[Error] ${err.message}`));
 
-    // Kick — stop tasks immediately, reconnect handled by 'end'
     bot.on('kicked', (reason) => {
         const r = String(reason);
         console.warn(`[Kicked] ${r}`);
@@ -174,7 +178,6 @@ function createBot() {
         if (/throttle|wait|rate.?limit/i.test(r)) reconnectAttempts += 2;
     });
 
-    // End — always fires after kick/error/quit, handles reconnect
     bot.on('end', (reason) => {
         console.log(`[Disconnect] ${reason || 'unknown'}`);
         stopAllTasks();
@@ -187,6 +190,7 @@ function createBot() {
 
     bot.on('death', () => {
         console.log('[Bot] Died — respawning...');
+        followControls.stopFollow(false);  // ← stop follow on death
         try { bot.pathfinder.stop(); } catch {}
     });
 
@@ -320,14 +324,12 @@ function createBot() {
         roamActive = true;
         console.log('[AntiAFK] Starting.');
 
-        // Arm swing every 15–40s
         const swingInt = setInterval(() => {
             if (!bot.entity || !roamActive) return;
             bot.swingArm();
         }, randMs(15000, 40000));
         roamTimers.push(swingInt);
 
-        // Crouch toggle every 90–180s
         const crouchInt = setInterval(() => {
             if (!bot.entity || !roamActive) return;
             bot.setControlState('sneak', true);
@@ -338,7 +340,6 @@ function createBot() {
         }, randMs(90000, 180000));
         roamTimers.push(crouchInt);
 
-        // Record spawn center for radius clamping
         const spawnX = bot.entity.position.x;
         const spawnZ = bot.entity.position.z;
         console.log(`[Roam] Spawn center: ${Math.floor(spawnX)}, ${Math.floor(spawnZ)}`);
@@ -346,7 +347,6 @@ function createBot() {
         let failStreak = 0;
 
         function pickGoal() {
-            // 6 block max radius — safe for the skyblock island
             const angle = Math.random() * Math.PI * 2;
             const dist  = 1.5 + Math.random() * 4.5;
             const tx    = spawnX + Math.cos(angle) * dist;
@@ -355,8 +355,6 @@ function createBot() {
         }
 
         async function roamStep() {
-            // Capture session at start — if stopAllTasks() runs mid-await,
-            // sessionId increments and this callback knows to bail out
             const mySession = sessionId;
 
             if (!bot.entity || !roamActive) return;
@@ -366,7 +364,6 @@ function createBot() {
 
             try {
                 await bot.pathfinder.goto(goal);
-                // After await — check if we're still in the same session
                 if (sessionId !== mySession || !roamActive) return;
                 console.log('[Roam] Reached.');
                 failStreak = 0;
@@ -374,7 +371,6 @@ function createBot() {
                 if (sessionId !== mySession || !roamActive) return;
                 const reason = e.message || String(e);
 
-                // GrimAC setback — not a real failure, just retry
                 if (/path was stopped/i.test(reason)) {
                     console.log('[Roam] Path interrupted by setback — retrying.');
                     const t = setTimeout(roamStep, 500);
@@ -400,7 +396,6 @@ function createBot() {
 
             if (sessionId !== mySession || !roamActive) return;
 
-            // Human-like pause 2–6s between walks
             const t = setTimeout(roamStep, randMs(2000, 6000));
             roamTimers.push(t);
         }
