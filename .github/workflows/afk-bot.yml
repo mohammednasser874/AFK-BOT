@@ -65,7 +65,7 @@ jobs:
         echo "=========================================="
         echo "       Starting COOLBOI AFK Bot          "
         echo "=========================================="
-        echo "Server: play.voidsmp.space:25565"
+        echo "Server: midnightsmp.axyron.cloud:25565"
         echo "Bot Name: COOLBOI"
         echo "Max Runtime: 5 hours 40 minutes"
         echo "=========================================="
